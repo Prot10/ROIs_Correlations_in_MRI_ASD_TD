@@ -1,0 +1,772 @@
+---
+title: "Statistical Methods in Data Science - Homework 2"
+output:
+  html_document: default
+  pdf_document: default
+date: '2022-12-29'
+---
+
+|      Student      | Matricola |                                             Email                                              |
+|:-----------------:|:-----------------:|:---------------------------------:|
+|  Protani Andrea   |  1860126  |  [protani.1860126\@studenti.uniroma1.it](mailto:protani.1860126@studenti.uniroma1.it){.email}  |
+| Tromboni Gabriele |  2088799  | [tromboni.2088799\@studenti.uniroma1.it](mailto:tromboni.2088799@studenti.uniroma1.it){.email} |
+|   Boesso Simone   |  1800408  |   [boesso.1800408\@studenti.uniroma1.it](mailto:boesso.1800408@studenti.uniroma1.it){.email}   |
+
+## Research questions
+
+1.  Load the pre-processed data contained in the file $\texttt{hw2_data.RData}$. You will get two lists of length 12, $\texttt{asd_sel}$ and $\texttt{td_sel}$ (one per group). In other words we have data from 12 $\texttt{ASD}$ subjects and 12 $\texttt{TD}$ subjects. Each slot of these lists contains a data.frame of size (145 × 116): the 116 columns are related to different $\texttt{ROIs}$, whereas the 145 rows are the observation times. Data coming from different subjects can/must also be considered independent from each other.\
+    \
+    **Remark**: you've 12 subjects per group $\rightarrow$ decide how to **pool** together their data (whatever the choice, please explain).
+
+2.  Let $\rho$ be the Pearson correlation. Set the threshold $t$ equal to a meaningfully high (trial-and-error, explain your choice) percentile of the correlation values observed in the two groups (hint: you can simply use $\texttt{cor()}$ inside an $\texttt{lapply()}$ to make $\texttt{asd_sel}$ and $\texttt{td_sel}$ into lists of 116 × 116 correlation matrices). Use **Fisher Z-transform** + **Bonferroni correction** to get two separate estimates, $\hat{\mathcal{G}}^{\text{ASD}}(t)$ and $\hat{\mathcal{G}}^{\text{TD}}(t)$, of the true association graphs based on 95% asymptotic confidence intervals for $\{\rho^\text{ASD}_{j,k} \}_{j,k}$ and $\{\rho^\text{TD}_{j,k} \}_{j,k}$.
+
+3.  If you haven't already, take a look at basic tools to deal with graphs in $\texttt{R}$ such as the $\texttt{igraph}$, $\texttt{ggraph}$ packages. Graphically represent all the estimated graphs and try to draw some conclusion: are there clear co-activation differences between the two groups? What happens if you skip the Bonferroni correction and work with unadjusted intervals? For a fixed $\alpha$, if you vary the threshold $t$ from small to large values, what connections are the more "resilient"; that is, the last ones to die? Are there differences in the two groups?
+
+4.  Repeat the analysis using this time the **partial correlation coefficient** and compare the results.
+
+------------------------------------------------------------------------
+
+## Analysis
+
+To pool the data we followed 3 different approaches which will mean 7 different trials. This choice was dictated by the fact that, having no knowledge of the subject, it was not clear to us from the outset what could be the best way to proceed to address this specific problem. In this way, after having also read articles on the subject to deepen on a theoretical level, we will be able to make a more "data-driven" decision.
+
+The different approaches and trials will consist of:
+
+1.  Pool data for both $\texttt{ASD}$ and $\texttt{TD}$ "across time" in order to create two 16x116 datasets to work on.
+
+-   In the first trial, we will take the arithmetic mean of each $\texttt{ROI}$ for each subject.
+-   In the second trial, we will take the median of each $\texttt{ROI}$ for each subject.
+-   In the third trial, we will take the standard deviation of each $\texttt{ROI}$ for each subject.
+
+2.  Pool data for both $\texttt{ASD}$ and $\texttt{TD}$ "across subject" in order to create two 145x116 datasets to work on.
+
+-   In the first trial, we will take the arithmetic mean of each $\texttt{ROI}$ for each time instant.
+-   In the second trial, we will take the median of each $\texttt{ROI}$ for each time instant.
+-   In the third trial, we will take the standard deviation of each $\texttt{ROI}$ for each time instant.
+
+3.  Consider all data as independent and create two 1740x116 datasets (one for $\texttt{ASD}$ and one for $\texttt{TD}$) in which we combine the temporal observations from the 12 different patients.
+
+Let's start by loading the data, the necessary libraries, defining some functions that we will need later and setting the values for some global variables.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+load('hw2_data.RData')
+
+library(data.table)    # used for the 'transpose' function
+library(GGally)        # for pairplot
+library(igraph)        # to create the actual graph
+library(knitr)         # to create markdown tables 
+
+# function to use in the lapply to calculate the "across time/subject" averages
+mean_fun <- function(x) round(apply(x, 2, mean), 5)
+
+# function to use in the lapply to calculate the "across time/subject" medians
+median_fun <- function(x) round(apply(x, 2, median), 5)
+
+# function to use in the lapply to calculate the "across time/subject" standard deviations
+sd_fun <- function(x) round(apply(x, 2, sd), 5)
+
+alpha = 0.05
+quantiles_list <- c(0, 0.3, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99)
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+### most relevant functions ###
+
+# function to compute cor.test on dataframe (taken from the professor's scripts) 
+cor.mtest <- function(mat, conf.level = 0.95){
+  mat <- as.matrix(mat)
+  n <- ncol(mat)
+  lowCI.mat <- uppCI.mat <- matrix(NA, n, n)
+  diag(lowCI.mat) <- diag(uppCI.mat) <- 1
+  for(i in 1:(n-1)){
+    for(j in (i+1):n){
+      tmp <- cor.test(mat[,i], mat[,j], conf.level = conf.level)
+      lowCI.mat[i,j] <- lowCI.mat[j,i] <- tmp$conf.int[1]
+      uppCI.mat[i,j] <- uppCI.mat[j,i] <- tmp$conf.int[2]
+    }
+  }
+  return(list(low = lowCI.mat, up = uppCI.mat))
+}
+
+# to quickly compute Bonferroni correction
+bonferroni <- function(data, alpha=0.05){
+  m <- choose(ncol(data), 2)
+  bonf  <- 1 - alpha/m
+  return (bonf)
+}
+
+# to quickly calculate how many correlations are statistically significant
+significative_count <- function(conf_int, t){
+  out <- sum((conf_int$up < -t) | (conf_int$low > t)) / 2
+  return (out)
+}
+
+# to quickly compute the adjacency matrices based on statistically significant correlations
+adj_matrix <- function(conf_int, t){
+  M <- 1*((conf_int$up < -t) | (conf_int$low > t))
+}
+
+```
+
+#### Exploratory Analysis
+
+We proceed with carrying out an exploratory analysis of the data by visualizing some plots.
+
+We use histograms to visualize, having set a region of interest, what are the distributions of the data for the 2 different types of subjects ($\texttt{TD}$ or $\texttt{ASD}$) and for the two different types of laboratories (Caltech or Trinity) from which the observations come.
+
+```{r echo=FALSE, fig.height=10, fig.width=10}
+
+# example of distribution in the two groups for a specific ROI
+par(mfrow = c(2,2))
+hist(td_sel$caltech_0051487$'2001', col='red', border='white', xlab='',
+     main='ROI=2001 in a TD from Caltech subject')
+box(); grid();
+hist(td_sel$trinity_0050259$'2001', col='red', border='white', xlab='',
+     main='ROI=2001 in a TD from Trinity subject')
+box(); grid();
+hist(asd_sel$caltech_0051472$'2001', col='blue', border='white', xlab='',
+     main='ROI=2001 in a ASD from Caltech subject')
+box(); grid();
+hist(asd_sel$trinity_0050234$'2001', col='blue', border='white', xlab='',
+     main='ROI=2001 in a ASD from Trinity subject')
+box(); grid();
+par(mfrow = c(1,1))
+
+```
+
+From the histograms it can be seen that there is a strong difference in the scales of the subjects from Caltech and those from Trinity. The histograms also looks a little bit like a bell shape symmetrical about 0.
+
+Let's also explore the correlations present between the first $\texttt{ROIs}$ of our datasets to verify if we can already detect any significant patterns (as an example we will use a subject from Caltech for both groups).\
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+
+ggpairs(td_sel$caltech_0051487, columns = 1:5, aes(alpha = 0.5),
+        upper = list(continuous = wrap("cor", size = 2.5))) +
+  theme(plot.title = element_text(hjust = 0.5, size = 20, face = "bold")) + 
+  ggtitle("Typically Developed (TP)")
+
+```
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+
+ggpairs(asd_sel$caltech_0051472, columns = 1:5, aes(alpha = 0.5),
+        upper = list(continuous = wrap("cor", size = 2.5))) +
+  theme(plot.title = element_text(hjust = 0.5, size = 20, face = "bold")) + 
+  ggtitle("Autism Spectrum Disorder (ASD)")
+
+```
+
+It' possible to immediately see some $\texttt{ROIs}$ that seem to be correlated.
+
+Let's now proceed with the implementation of the trials previously proposed.\
+
+As a threshold we start with $t=0$ and then we will raise it until we find an optimal level and then even more until we find the most resilient or the *'last ones to die'*.
+
+We will work in parallel both with the confidence intervals calculated with $\alpha=0.05$ and with the confidence intervals calculated after having performed the Bonferroni Correction.
+
+Since we had to carry out numerous tests, we created a function that collects the main steps to be performed to find the number of significant correlations, both for $\texttt{ASD}$ and $\texttt{TD}$ but also the number of equal and different significant correlations between the two groups.\
+The function in question is the following:
+
+```{r}
+
+create_tables <- function(df1, df2, lista_q, alpha, type='pearson'){
+  # df1 must be the dataframe that refers to ASD subjects
+  # df2 must be the dataframe that refers to TD subjects
+  # type must be 'pearson' or 'partial'
+  
+  # to choose the threshold t...
+  corr_asd <- cor(df1)
+  corr_td  <- cor(df2)
+  # remove the diagonal
+  diag(corr_asd) <- diag(corr_td) <- 0
+  # calculate the threshold
+  lista_t <- rep(NA, length(lista_q))
+  for (i in 1:length(lista_q)) lista_t[i] <- quantile(abs(c(corr_asd, corr_td)), lista_q[i])
+  
+  # confidence intervals at level 1-alpha
+  if (type=='pearson'){
+    conf_td  <- cor.mtest(df2, 1-alpha)
+    conf_asd <- cor.mtest(df1, 1-alpha)
+  }
+  else{
+    conf_td  <- cor.mtest_partial(df2, 1-alpha)
+    conf_asd <- cor.mtest_partial(df1, 1-alpha)
+  }
+  diag(conf_td$low)  <- diag(conf_td$up) <- 0
+  diag(conf_asd$low) <- diag(conf_asd$up) <- 0
+  
+  # new alpha deriving from the Bonferroni Correction with the function previously created
+  bonf <- bonferroni(df1, alpha)
+  
+  # confidence intervals adjusting for multiplicity
+  if (type=='pearson'){
+    conf_td_bonf  <- cor.mtest(df2, bonf)
+    conf_asd_bonf <- cor.mtest(df1, bonf)
+  }
+  else{
+    conf_td_bonf  <- cor.mtest_partial(df2, bonf)
+    conf_asd_bonf <- cor.mtest_partial(df1, bonf)
+  }
+  diag(conf_td_bonf$low)  <- diag(conf_td_bonf$up) <- 0
+  diag(conf_asd_bonf$low) <- diag(conf_asd_bonf$up) <- 0
+  
+  # initialize the matrix where we will store the results
+  result_matrix <- matrix(NA, length(lista_t)*2, 4)
+  
+  for (i in 1:length(lista_t)){
+    
+    # setting the threshold
+    t <- lista_t[i]
+    
+    # counting how many correlations are statistically
+    # significant with the function previously created
+    result_matrix[i*2-1, 1] <- significative_count(conf_td, t)
+    result_matrix[i*2-1, 2] <- significative_count(conf_asd, t)
+    result_matrix[i*2, 1]   <- significative_count(conf_td_bonf, t)
+    result_matrix[i*2, 2]   <- significative_count(conf_asd_bonf, t)
+    
+    # building the adjacency matrices for ASD and TD
+    # with the function previously created
+    M_td       <- adj_matrix(conf_td, t)
+    M_asd      <- adj_matrix(conf_asd, t)
+    M_td_bonf  <- adj_matrix(conf_td_bonf, t)
+    M_asd_bonf <- adj_matrix(conf_asd_bonf, t)
+    
+    # adj. matr. for the different/same significant corr. between ASD and TD
+    # where we will have 2 it means that both are significant
+    M_diff <- M_same <- M_asd + M_td
+    M_diff[M_diff == 2] <- 0
+    M_same[M_same == 1] <- 0
+    M_same[M_same == 2] <- 1
+    
+    # adj. matr. for the different/same significant corr. between ASD and TD with Bonferroni
+    M_diff_bonf <- M_same_bonf <- M_asd_bonf + M_td_bonf
+    M_diff_bonf[M_diff_bonf == 2] <- 0
+    M_same_bonf[M_same_bonf == 1] <- 0
+    M_same_bonf[M_same_bonf == 2] <- 1
+    
+    result_matrix[i*2-1, 3] <- sum(M_same) / 2
+    result_matrix[i*2-1, 4] <- sum(M_diff) / 2
+    result_matrix[i*2, 3]   <- sum(M_same_bonf) / 2
+    result_matrix[i*2, 4]   <- sum(M_diff_bonf) / 2
+    
+  }
+  
+  # putting everything in a dataframe to organize the results
+  quantiles <- rep(lista_q, each = 2)
+  threshold <- rep(round(lista_t, 3), each = 2)
+  col_alpha <- rep(c('0.05', 'Bonf'), length(lista_t))
+  result_matrix <- cbind(quantiles, threshold, col_alpha, result_matrix)
+  tab <- data.frame(result_matrix)
+  colnames(tab) <- c('Quantile', 'Threshold', 'Alpha CI', 'TD', 'ASD', 'Common', 'Different')
+  
+  return (tab)
+}
+
+```
+
+Some further considerations on the chosen approaches:
+
+**About the first approach**, we thought the relevant information could be extracted losing the sequential time order as we have a single observation for each subject. It's a group-indendepent approach, in fact we are not summarized influencing by other subjects in the same group. At the end we get a 12x116 dataframe for each group: here, each compression is done on 145 values.
+
+**About the second approach**, the relevant information could be extracted summarizing for each cerebral region all the observations taken in a given time series for all the subjects in the same group. So it's more dependent on the features shown by the group. At the end we get a 145x116 dataframe for each group: here, each compression is done on 12 values.
+
+**About the third approach**, we thought to go on without summarizing the info both by subjects and time series, so only concatenating observations we could extract relevant information between the two groups. At the end we get a 1740x116 dataframe for each group.
+
+***
+
+#### Let's start with the analysis:
+
+**Trial 1:** pool "across time" with the arithmetic mean.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd_mean <- lapply(asd_sel, mean_fun)
+td_mean  <- lapply(td_sel, mean_fun)
+
+# create the new dataframes
+asd_data <- transpose(data.frame(asd_mean))
+td_data  <- transpose(data.frame(td_mean))
+colnames(asd_data) <- names(asd_mean[[1]])
+colnames(td_data)  <- names(td_mean[[1]])
+
+tab_1 <- create_tables(asd_data, td_data, quantiles_list, 0.05)
+
+kable(tab_1, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Trial 2:** pool "across time" with the median.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd_median <- lapply(asd_sel, median_fun)
+td_median  <- lapply(td_sel, median_fun)
+
+# create the new dataframes
+asd_data2 <- transpose(data.frame(asd_median))
+td_data2  <- transpose(data.frame(td_median))
+colnames(asd_data2) <- names(asd_median[[1]])
+colnames(td_data2)  <- names(td_median[[1]])
+
+tab_2 <- create_tables(asd_data2, td_data2, quantiles_list, 0.05)
+
+kable(tab_2, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Trial 3:** pool "across time" with the standard deviation.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd_sd <- lapply(asd_sel, sd_fun)
+td_sd  <- lapply(td_sel, sd_fun)
+
+# create the new dataframes
+asd_data3 <- transpose(data.frame(asd_sd))
+td_data3  <- transpose(data.frame(td_sd))
+colnames(asd_data3) <- names(asd_sd[[1]])
+colnames(td_data3)  <- names(td_sd[[1]])
+
+tab_3 <- create_tables(asd_data3, td_data3, quantiles_list, 0.05)
+
+kable(tab_3, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Comments:**\
+In general this approach, i.e. the pool across time, was the one that convinced us the most. In this specific case, however, we have too few subjects to proceed in this way, having dataframes of 12 rows is not enough to arrive at conclusions that have a minimum of credibility.\
+For this reason we have discarded attempts based on this approach.
+
+------------------------------------------------------------------------
+
+Let's now proceed with the creation of the dataframes based on the second approach which we will need to perform tests 4,5,6.
+
+```{r , message=FALSE, warning=FALSE}
+
+# Initialize an empty list to store the rows
+td_list  <- list()
+asd_list <- list()
+
+# create the new list of dataframes 145x116
+for (i in 1:145) {
+  row_td  <- lapply(td_sel, function(df) df[i,])
+  row_asd <- lapply(asd_sel, function(df) df[i,])
+  td_list[[i]]  <- do.call(rbind, row_td)
+  asd_list[[i]] <- do.call(rbind, row_asd)
+}
+
+```
+
+**Trial 4:** pool "across subject" with the arithmetic mean.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd2_mean <- data.frame(do.call(rbind, lapply(asd_list, mean_fun)))
+colnames(asd2_mean) <- names(td_sel[[1]])
+td2_mean <- data.frame(do.call(rbind, lapply(td_list, mean_fun)))
+colnames(td2_mean) <- names(td_sel[[1]])
+
+tab_4 <- create_tables(asd2_mean, td2_mean, quantiles_list, 0.05)
+
+kable(tab_4, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Trial 5:** pool "across subject" with the median.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd2_median <- data.frame(do.call(rbind, lapply(asd_list, median_fun)))
+colnames(asd2_median) <- names(td_sel[[1]])
+td2_median <- data.frame(do.call(rbind, lapply(td_list, median_fun)))
+colnames(td2_median) <- names(td_sel[[1]])
+
+tab_5 <- create_tables(asd2_median, td2_median, quantiles_list, 0.05)
+
+kable(tab_5, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Trial 6:** pool "across subject" with the standard deviation.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+asd2_sd <- data.frame(do.call(rbind, lapply(asd_list, sd_fun)))
+colnames(asd2_sd) <- names(td_sel[[1]])
+td2_sd <- data.frame(do.call(rbind, lapply(td_list, sd_fun)))
+colnames(td2_sd) <- names(td_sel[[1]])
+
+tab_6 <- create_tables(asd2_sd, td2_sd, quantiles_list, 0.05)
+
+kable(tab_6, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Comments:**\
+Looking at the tables, the first thing you notice is that there are many more significant correlations for the mean and median, while much less are found for the standard deviation compared to the first approach. This makes sense as we are going from a 12-row dataset to a 145-row dataset. The results are undoubtedly more accurate but still not perfect as there could be problems caused by putting together subjects whose data was collected from different laboratories that, like we have seen previously with the histograms, have different scales. Despite this, we decided to proceed without standardizing by laboratory as in our specific case we did not consider it necessary as our goal is to verify that there are significant differences between the $\texttt{ASD}$ and $\texttt{TD}$ groups and we thought that therefore the study of correlations would not be significantly affected by the above problem.
+
+------------------------------------------------------------------------
+
+**Trial 7:** concatenate all the observation together.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+df_asd <- do.call(rbind, asd_sel)
+df_td  <- do.call(rbind, td_sel)
+
+tab_7 <- create_tables(df_asd, df_td, quantiles_list, 0.05)
+
+kable(tab_7, "markdown", align = "c", booktabs = TRUE, longtable = TRUE, 
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+**Comments:**\
+This method is the one that allows us to find the largest number of significant correlations but this is derived from too strong assumptions made for the data pool. In fact, independence across time is already forced, so considering everything independent turns out to be really too much and leads to results affected by various problems. We get results too accurate because having such a large number of information leads us to obtain short confidence intervals and small standard errors. But the problem is that the data are not really independent of each other.
+
+------------------------------------------------------------------------
+
+Going into the specifics of why we tried several statistics:\
+- **Arithmetic mean:** since it is less resistant to outliers we initially thought it might be a desirable feature to account for the variability of observations. Carrying out the analysis and seeing the results, however, we changed our minds since it seemed to us that it gave too many significant correlations.\
+- **Median:** discourse opposite to the mean, statistic chosen to resist outliers, makes us obtain less (in number) significant correlations but we thought it was the right thing as we want to be conservative about affirming that there are significant correlations.\
+- **Standard deviation:** different statistic from the previous ones, looking at finance and the studies that are carried out on volatility, we thought it might make sense to study the correlations of this statistic in our case too. We weren't too convinced by the results and the consideration we came to is that it could be useful but mostly in combination with the median or in any case with another statistic.
+
+Following all these reasoning we decide to proceed with the next points of the exercise based on trial 5, i.e. the pool of data carried out across subject using the median.\
+Moreover, the right compromise between a fairly high quantile and the number of acceptable significant correlations seems to us to be at level 0.9, so that is what we will use.
+
+Therefore by setting $t=0.281$ we construct the adjacency matrices on which the graphs will be based.
+
+```{r  message=FALSE, warning=FALSE}
+
+bonf <- bonferroni(td2_median, alpha)
+
+# confidence intervals at level 0.95
+conf_asd <- cor.mtest(asd2_median, 1-alpha)
+diag(conf_asd$low) <- diag(conf_asd$up) <- 0
+conf_td  <- cor.mtest(td2_median, 1-alpha)
+diag(conf_td$low) <- diag(conf_td$up) <- 0
+
+# confidence intervals adjusting for multiplicity with the Bonferroni correction
+conf_asd_bonf <- cor.mtest(asd2_median, bonf)
+diag(conf_asd_bonf$low) <- diag(conf_asd_bonf$up) <- 0
+conf_td_bonf  <- cor.mtest(td2_median, bonf)
+diag(conf_td_bonf$low) <- diag(conf_td_bonf$up) <- 0
+
+# setting the threshold to the value chosen before
+t <- 0.281
+
+# building the adjacency matrices fro the two groups
+M_asd <- 1*((conf_asd$up < -t) | (conf_asd$low > t))
+M_bonf_asd <- 1*((conf_asd_bonf$up < -t) | (conf_asd_bonf$low > t))
+M_td  <- 1*((conf_td$up < -t) | (conf_td$low > t))
+M_bonf_td  <- 1*((conf_td_bonf$up < -t) | (conf_td_bonf$low > t))
+
+# and now for the differences and the equal
+M_asd_td_diff <- M_asd_td_same <- M_asd + M_td
+M_asd_td_diff[M_asd_td_diff == 2] <- 0
+M_asd_td_same[M_asd_td_same == 1] <- 0
+M_asd_td_same[M_asd_td_same == 2] <- 1
+M_bonf_asd_td_diff <- M_bonf_asd_td_same <- M_bonf_asd + M_bonf_td
+M_bonf_asd_td_diff[M_bonf_asd_td_diff == 2] <- 0
+M_bonf_asd_td_same[M_bonf_asd_td_same == 1] <- 0
+M_bonf_asd_td_same[M_bonf_asd_td_same == 2] <- 1
+
+# creating the graphs
+G_asd   <-  graph_from_adjacency_matrix(M_asd, mode = "undirected")
+G_td    <-  graph_from_adjacency_matrix(M_td, mode = "undirected")
+G_diff  <-  graph_from_adjacency_matrix(M_asd_td_diff, mode = "undirected")
+G_same  <-  graph_from_adjacency_matrix(M_asd_td_same, mode = "undirected")
+
+```
+
+Let's also check which correlations between the $\texttt{ROIs}$ are the most resilient, to do so we raise the threshold level to the value which, as shown previously in the table, caused us to find fewer correlations. So let's set $t=0.343$ and use the confidence intervals calculated with the Bonferroni Correction.
+
+```{r  message=FALSE, warning=FALSE}
+
+# we set the threshold to the maximum value that allows us to find significant correlations
+t <- 0.343
+
+# building the adjacency matrices fro the two groups
+M_bonf_asd2 <- 1*((conf_asd_bonf$up < -t) | (conf_asd_bonf$low > t))
+M_bonf_td2  <- 1*((conf_td_bonf$up < -t) | (conf_td_bonf$low > t))
+
+resilient_td <- which(M_bonf_td2==1, arr.ind=T)
+resilient_corr_td <- unique(t(apply(resilient_td, 1, sort)), MARGIN = 1)
+resilient_corr_td <- apply(resilient_corr_td, 1, function(x) paste(x, collapse = "-"))
+resilient_asd <- which(M_bonf_asd2==1, arr.ind=T)
+resilient_corr_asd <- unique(t(apply(resilient_asd, 1, sort)), MARGIN = 1)
+resilient_corr_asd <- apply(resilient_corr_asd, 1, function(x) paste(x, collapse = "-"))
+resilient_corr_asd <- c(resilient_corr_asd, rep("", 2))
+resilient_matrix <- cbind(resilient_corr_td, resilient_corr_asd)
+tab <- data.frame(resilient_matrix)
+colnames(tab) <- c('ROIs in TD subject', 'ROIs in ASD subject')
+kable(tab, "markdown", align = "c", booktabs = TRUE, longtable = TRUE, 
+      caption = "Resilient Correlations", escape = TRUE)
+
+```
+
+These are *"the last ones to die"*. It can be seen that the only pair present in both $\texttt{ASDs}$ and $\texttt{TDs}$ is between $\texttt{ROIs}$ 48-111 and we can also notice that $\texttt{ROI}$ 111 is the only one to appear in two different pairs in the$\texttt{TD}$group.
+
+------------------------------------------------------------------------
+
+#### Visualization
+
+Let's now visualize the plots of the graphs based on the confidence interval at level $1-\alpha$ with $\alpha=0.05$.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=12, fig.width=12}
+
+par(mfrow = c(2,2))
+layout_G_asd <- layout.fruchterman.reingold(G_asd)
+plot(G_asd, vertex.size=8, vertex.color="aliceblue", edge.color="blue",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_asd, main="Marginal Correlation Graph for ASD")
+layout_G_td <- layout.fruchterman.reingold(G_td)
+plot(G_td, vertex.size=8, vertex.color="aliceblue", edge.color="red",
+     label.col = "black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_td, main="Marginal Correlation Graph for TD")
+layout_G_diff <- layout.fruchterman.reingold(G_diff)
+plot(G_diff, vertex.size=8, vertex.color="aliceblue", edge.color="darkorange2",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_diff, main = "Marginal Correlation Graph for\ndifferent activation between ASD and TD")
+layout_G_same <- layout.fruchterman.reingold(G_same)
+plot(G_same, vertex.size=8, vertex.color="aliceblue", edge.color="gold",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_same, main="Marginal Correlation Graph for\nequal activation between ASD and TD")
+par(mfrow = c(1,1))
+
+
+```
+
+And now using the ones based on the confidence after after the Bonferroni Correction.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=12, fig.width=12}
+
+# creating the graphs
+G_bonf_asd   <-  graph_from_adjacency_matrix(M_bonf_asd, mode = "undirected")
+G_bonf_td    <-  graph_from_adjacency_matrix(M_bonf_td, mode = "undirected")
+G_bonf_diff  <-  graph_from_adjacency_matrix(M_bonf_asd_td_diff, mode = "undirected")
+G_bonf_same  <-  graph_from_adjacency_matrix(M_bonf_asd_td_same, mode = "undirected")
+
+par(mfrow = c(2,2))
+layout_G_bonf_asd <- layout.fruchterman.reingold(G_bonf_asd)
+plot(G_bonf_asd, vertex.size=0.1, vertex.color="aliceblue", edge.color="blue",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     main="Marginal Correlation Graph for ASD")
+layout_G_bonf_td <- layout.fruchterman.reingold(G_bonf_td)
+plot(G_bonf_td, vertex.size=0.1, vertex.color="aliceblue", edge.color="red",
+     label.col = "black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     main="Marginal Correlation Graph for TD")
+layout_G_bonf_diff <- layout.fruchterman.reingold(G_bonf_diff)
+plot(G_bonf_diff, vertex.size=0.1, vertex.color="aliceblue", edge.color="darkorange2",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     main = "Marginal Correlation Graph for\ndifferent activation between ASD and TD")
+layout_G_bonf_same <- layout.fruchterman.reingold(G_bonf_same)
+plot(G_bonf_same, vertex.size=0.1, vertex.color="aliceblue", edge.color="gold",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     main="Marginal Correlation Graph for\nequal activation between ASD and TD")
+par(mfrow = c(1,1))
+
+```
+
+From the graphs but also from the table relating to trial 5 which was shown previously, first of all we can appreciate the clear differences in whether the Bonferroni Correction is used or not, so it seems to be necessary to fix the problem of multiplicity and not risk thinking that there are a large number of significant correlations. Going now to examine the differences between the two groups, the number of significant correlations remains more or less always the same, however it is the pairs of $\texttt{ROIs}$ that are significant that change. In fact, for each threshold tested the activations common to both groups are much less than the different ones and this is well represented by these last graphs.\
+We can therefore *cautiously* say that there appear to be differences in the way $\texttt{ROIs}$ react to stimuli between subjects with autism and subjects without.
+
+------------------------------------------------------------------------
+
+#### Partial Correlation
+
+We now turn the analysys to the **Partial Correlation** instead of the Pearson correlation. For the calculation we decided to use the approach based on the calculation of linear regression with subsequent verification of the correlation of the residuals. In particular what we will do is: given a pair of $\texttt{ROIs}$, we will calculate the residuals of the linear regression of the first $\texttt{ROI}$ with features given by the remaining N-2 $\texttt{ROIs}$, and then we will do the same for the second, at this point we will calculate the Pearson Correlation between the residuals deriving from the two models and we will repeat this procedure for each possible pair of the 116 $\texttt{ROIs}$.
+
+To obtain this result we modify two previously used functions ($\texttt{cor.test()}$ and $\texttt{cor.mtest()}$) in order calculates the Partial Correlation instead of the Pearson Correlation.
+
+```{r  message=FALSE, warning=FALSE}
+
+cor.test_partial <- function(x, y, n, D, conf.level){
+  r <- cor(x, y)
+  z <- atanh(r)
+  # we have to change sigma from 1/sqrt(n-3) to 1/sqrt(n-D-1)
+  sigma <- 1 / sqrt(n - D - 1)
+  cint  <- z + c(-1, 1) * sigma * qnorm((1 + conf.level) / 2)
+  cint  <- tanh(cint)
+  return (cint)
+}
+
+cor.mtest_partial <- function(mat, conf.level = 0.95){
+  mat <- as.matrix(mat)
+  D <- ncol(mat)
+  n <- nrow(mat)
+  lowCI.mat <- uppCI.mat <- matrix(NA, D, D)
+  diag(lowCI.mat) <- diag(uppCI.mat) <- 1
+  for(i in 1:(D-1)){
+    for(j in (i+1):D){
+      x <- mat[, i]
+      y <- mat[, j]
+      z <- mat[, -c(i, j)]
+      res_x <- lm(x ~ z)$residuals
+      res_y <- lm(y ~ z)$residuals
+      tmp <- cor.test_partial(res_x, res_y, n, D, conf.level)
+      lowCI.mat[i,j] <- lowCI.mat[j,i] <- tmp[1]
+      uppCI.mat[i,j] <- uppCI.mat[j,i] <- tmp[2]
+    }
+  }
+  return(list(low = lowCI.mat, up = uppCI.mat))
+}
+
+```
+
+As done previously we calculate the number of significant correlations for each threshold. We decided to reuse the previous thresholds and not to calculate new ones based on the quantiles of the partial correlations. We thought that this approach (based on the $t$ and not on the quantile level) is more useful to make a better comparison.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+partial_corr <- create_tables(asd2_median, td2_median, quantiles_list, alpha, type='partial')
+kable(partial_corr, "markdown", align = "c", booktabs = TRUE, longtable = TRUE,
+      caption = "Number of Significant Correlations", escape = TRUE)
+
+```
+
+From the table we immediately notice a big difference between the two types of correlation. With the Partial Correlation, much less significant correlations are obtained, in particular by performing the Bonferroni Correction no significant correlations are found at any threshold! \
+The last significant correlations are found at the quantile level 0.95 which corresponds to $t=0.343$. It is interesting to note that the significant correlations in the two groups are practically always different. This would seem to suggest again that there is a difference between the two groups, but the table shows that this difference is not so significant, since even with $t=0$ if we correct for multiplicity we do not find significant correlations between the $\texttt{ROIs}$.
+
+In the same way used previously we are going to calculate, with $t=0.281$, the correlation matrices with which we will create the graphs. Of course we will do it only for the confidence intervals calculated with $\alpha=0.05$ since we know that with Bonferroni we do not find significant correlations.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+
+# confidence intervals at level 0.95
+conf_asd <- cor.mtest_partial(asd2_median, 1-alpha)
+diag(conf_asd$low) <- diag(conf_asd$up) <- 0
+conf_td  <- cor.mtest_partial(td2_median, 1-alpha)
+diag(conf_td$low) <- diag(conf_td$up) <- 0
+
+# setting the threshold to the value chosen before
+t <- 0.281
+
+# building the adjacency matrices for the two groups
+M_asd_partial <- 1*((conf_asd$up < -t) | (conf_asd$low > t))
+M_td_partial  <- 1*((conf_td$up < -t) | (conf_td$low > t))
+
+# and now for the differences and the equal
+M_asd_td_diff_partial <- M_asd_td_same_partial <- M_asd_partial + M_td_partial
+M_asd_td_diff_partial[M_asd_td_diff_partial == 2] <- 0
+M_asd_td_same_partial[M_asd_td_same_partial == 1] <- 0
+M_asd_td_same_partial[M_asd_td_same_partial == 2] <- 1
+
+```
+
+Let's also check if the most resilient correlations have changed now that we are using the Partial Correlation.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=12, fig.width=12}
+
+# we set the threshold to the maximum value that allows us to find significant correlations
+t <- 0.343
+
+# building the adjacency matrices for the two groups
+M_td_partial2  <- 1*((conf_td$up < -t) | (conf_td$low > t))
+M_asd_partial2 <- 1*((conf_asd$up < -t) | (conf_asd$low > t))
+
+# find the which are the most resilient
+resilient_td <- which(M_td_partial2==1, arr.ind=T)
+resilient_corr_td <- unique(t(apply(resilient_td, 1, sort)), MARGIN = 1)
+resilient_corr_td <- apply(resilient_corr_td, 1, function(x) paste(x, collapse = "-"))
+resilient_corr_td <- c(resilient_corr_td, rep("", 2))
+resilient_asd <- which(M_asd_partial2==1, arr.ind=T)
+resilient_corr_asd <- unique(t(apply(resilient_asd, 1, sort)), MARGIN = 1)
+resilient_corr_asd <- apply(resilient_corr_asd, 1, function(x) paste(x, collapse = "-"))
+resilient_matrix <- cbind(resilient_corr_td, resilient_corr_asd)
+tab <- data.frame(resilient_matrix)
+colnames(tab) <- c('ROIs in TD subject', 'ROIs in ASD subject')
+kable(tab, "markdown", align = "c", booktabs = TRUE, longtable = TRUE, 
+      caption = "Resilient Correlations", escape = TRUE)
+
+```
+
+The pairs are all different, however there is a particular case, the pair of $\texttt{ROIs}$ 29-73 with the Pearson correlation was significant in the $\texttt{TD}$ group while with the Partial Correlation it turns out to be significant for the $\texttt{ASD}$ group. \ Furthermore, it can be noted that the number of significant correlations is reversed, in the sense that with Pearson we found more significant correlations for $\texttt{TD}$ (5 for $\texttt{TD}$ and 3 for $\texttt{ASD}$) while with the Partial Correlation we find more for $\texttt{ASD}$ (4 for $\texttt{ASD}$ and 2 for $\texttt{TD}$)
+
+Let's now go on to visualize the graphs deriving from the analyzes carried. Naturally, as previously said, we will only use the confidence intervals constructed with $\alpha=0.05$, otherwise we will have graphs without edges.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=12, fig.width=12}
+
+# creating the graphs
+G_asd_partial   <-  graph_from_adjacency_matrix(M_asd_partial, mode = "undirected")
+G_td_partial    <-  graph_from_adjacency_matrix(M_td_partial, mode = "undirected")
+G_diff_partial  <-  graph_from_adjacency_matrix(M_asd_td_diff_partial, mode = "undirected")
+G_same_partial  <-  graph_from_adjacency_matrix(M_asd_td_same_partial, mode = "undirected")
+
+par(mfrow = c(2,2))
+layout_G_asd_partial <- layout.fruchterman.reingold(G_asd_partial)
+plot(G_asd_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="blue",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_asd_partial,
+     main="Marginal Correlation Graph for ASD")
+layout_G_td_partial <- layout.fruchterman.reingold(G_td_partial)
+plot(G_td_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="red",
+     label.col = "black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_td_partial,
+     main="Marginal Correlation Graph for TD")
+layout_G_diff_partial <- layout.fruchterman.reingold(G_diff_partial)
+plot(G_diff_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="darkorange2",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_diff_partial, 
+     main = "Marginal Correlation Graph for\ndifferent activation between ASD and TD")
+layout_G_same_partial <- layout.fruchterman.reingold(G_same_partial)
+plot(G_same_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="gold",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     main="Marginal Correlation Graph for\nequal activation between ASD and TD")
+par(mfrow = c(1,1))
+
+
+```
+ 
+From the comparison with the previous graphs relating to the Pearson Correlation, the differences are immediately noticeable but let's create one last plot to visualize even better the differences between the two attempted correlation methods. \
+To summarize the information of the significant correlations of the different groups we will use different colors which will resume those used in the previous graphs.
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE, fig.height=12, fig.width=12}
+
+par(mfrow = c(1,2))
+
+# par 1,1
+plot(G_asd, vertex.size=0.1, vertex.color="aliceblue", edge.color="blue",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_td, 
+     main=expression(paste("Pearson Correlation Graph with ", alpha, "=0.05")))
+plot(G_td, vertex.size=0.1, vertex.color="aliceblue", edge.color="red",
+     label.col = "black", curved=TRUE, edge.arrow.size=2, edge.width=3.5,
+     layout=layout_G_td, add=T)
+plot(G_same, vertex.size=0.1, vertex.color="aliceblue", edge.color="gold",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=4.5,
+     layout=layout_G_td, add=T)
+
+# par 1,2
+plot(G_asd_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="blue",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=2.5,
+     layout=layout_G_td_partial, 
+     main=expression(paste("Partial Correlation Graph with ", alpha, "=0.05")))
+plot(G_td_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="red",
+     label.col = "black", curved=TRUE, edge.arrow.size=2, edge.width=3.5,
+     layout=layout_G_td_partial, add=T)
+plot(G_same_partial, vertex.size=0.1, vertex.color="aliceblue", edge.color="gold",
+     label.col="black", curved=TRUE, edge.arrow.size=2, edge.width=4.5,
+     layout=layout_G_td_partial, add=T)
+legend('topleft', c("TD subject activation",
+                          "ASD subject activation",
+                          "Both subject activation"), 
+       lty = 1, lwd = 3, col = c("red", "blue", "gold"))
+
+par(mfrow = c(1,1))
+
+```
+
+**Conclusion**
+
+From the comparison between the two methods we can say that both seem to suggest a difference between the two groups, as the significant activations are almost all different between the two groups, the problem however is that with the Partial Correlation we cannot carry out the correction for the multiplicity with Bonferroni as following the analysis there are no significant correlations between the various $\texttt{ROIs}$. In part this is foreseeable from the theory, as by removing the effect of the other variables and therefore reducing the noise, we are going to verify the "true" and "intrinsic" correlation between the $\texttt{ROIs}$ pairs, however we did not expect such a large difference and this is perhaps due to datasets that are not perfect to perform such an analysis as the number of rows $n=145$ is slightly larger than the number of columns $D=116$.
+
+
